@@ -325,6 +325,84 @@ column explicitly, and checking the count before using it, costs two lines.
 
 ---
 
+## 10. An `export` in `systemCmd` makes a shipped effect unreachable — CONFIRMED
+
+**Impact.** One of the six Eventide reverbs you ship cannot be selected on the
+instrument, and never has been.
+
+`init_sc_1.scd` line 23:
+
+```supercollider
+("export LADSPA_PATH=/usr/share/las-fx/ladspa").systemCmd;
+```
+
+`systemCmd` runs its argument in a subshell, so the `export` dies with that
+subshell. It never reaches `sclang`'s environment and certainly not the `scsynth`
+it boots, so `LadspaUGen` falls back to its built-in default of `/usr/lib/ladspa`.
+
+The consequence is visible on disk:
+
+```
+/usr/share/las-fx/ladspa/   blackhole  hall  plate  room  shimmer  SPRING
+/usr/lib/ladspa/            blackhole  hall  plate  room  shimmer
+```
+
+Five plugins appear to have been copied into the fallback directory by hand. The
+sixth was missed, and nothing pointed it out because the line that was supposed to
+make the copy unnecessary silently does nothing.
+
+**A second, independent fault keeps it unreachable even once the plugin loads.**
+`et_spring` has SynthDef source in `synthdefs.scd` beside the other five, calling
+`LADSPA.ar(2, 29153, ...)`, but there is no `et_spring.scsyndef` in
+`/usr/share/las-fx/synthdefs/`. `init_sc_1.scd` loads that directory with
+`loadDirectory`, so an uncompiled definition does not exist to the server.
+
+**Evidence it has never been used:** `strings` over the 100 MB factory bank
+`MOOG ONE.db` finds every other effect family tens of thousands of times and
+`et_spring` **zero** times.
+
+**Fix.** Set the environment before `sclang` starts — in `launch-sc-1`, where the
+other environment variables for the server already are — rather than from inside
+it:
+
+```sh
+LADSPA_PATH=/usr/share/las-fx/ladspa DISPLAY=:0 SCSYNTH_IP=$scip ... sclang ...
+```
+
+and add `et_spring` to whatever compiles the rest of `synthdefs.scd`.
+`scripts/apply.sh` will carry both once tested on hardware.
+
+---
+
+## 11. The two-server configuration cannot run — CONFIRMED
+
+`init_sc_2.scd` describes exactly the architecture this hardware needs, in its own
+comment: `// frontendGroup lives on shared CPU core, dspGroup lives on DSP core`.
+It is unreachable in four independent ways, listed because any one of them alone
+would be a small fix and together they suggest it was abandoned rather than
+finished:
+
+* **Nothing selects it.** `launch-sc-2` is a byte-for-byte copy of `launch-sc-1`,
+  including the banner `LAUNCHING SINGLE EFFECTS SERVER CONFIGURATION`, and loads
+  `init_sc_1.scd`. No file on the device references `init_sc_2.scd`.
+* **`~dspGroup` is used at lines 68-69 and defined at line 77**, so the input and
+  output routers are created against `nil`.
+* **`~serverANumOuts = 4`**, but the main outputs are buses 0 and 7. Bus 7 does
+  not exist on `server_a`.
+* **No JACK.** Two servers cannot share the card without it, and `init_sc_2.scd`
+  does not start `jackd`. The two scripts that do, `launch-sc` and `launch-sn`,
+  both `cd /usr/share/efx` — **and that directory does not exist on the device.**
+
+`launch-sn` would launch `supernova`, SuperCollider's multicore server, which is
+the correct answer to finding 4's CPU ceiling. **No `supernova` binary is
+installed.**
+
+**Why this matters now.** Finding 4 shows a single Eventide reverb taking an
+ordinary patch from 72% to 101% of one core. The i.MX6 has two. Nothing in the
+shipped configuration uses the second one for audio.
+
+---
+
 ## RETRACTED — `inputRouter` writes 56-59, `outputRouter` reads 60-63
 
 Reading `synthdefs.scd`, `inputRouter` ends with `Out.ar(56..59, ...)` while
