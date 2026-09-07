@@ -361,16 +361,48 @@ make the copy unnecessary silently does nothing.
 `MOOG ONE.db` finds every other effect family tens of thousands of times and
 `et_spring` **zero** times.
 
-**Fix.** Set the environment before `sclang` starts — in `launch-sc-1`, where the
-other environment variables for the server already are — rather than from inside
-it:
+**A third fault, and the reason the first two were never noticed.** The
+`et_spring` SynthDef would not have worked even if it had been compiled and the
+plugin had loaded. It passes the **plate's** argument list into the spring:
 
-```sh
-LADSPA_PATH=/usr/share/las-fx/ladspa DISPLAY=:0 SCSYNTH_IP=$scip ... sclang ...
+```supercollider
+distance, diffusion, modLvl, tone, highDamp, lowDamp, preDelay, size, decay, mix
 ```
 
-and add `et_spring` to whatever compiles the rest of `synthdefs.scd`.
-`scripts/apply.sh` will carry both once tested on hardware.
+`ladspalist` reports 29153's actual ports as:
+
+```
+TREM-INTENSITY  TREM-RATE  MOD-LEVEL  RESONANCE  HIGH-DAMP
+LOW-DAMP        NUM SPRINGS  TENSION  DECAY      MIX
+```
+
+Ten control ports either way, so it maps positionally and compiles cleanly. Every
+knob is simply the wrong knob — and `preDelay`'s default of **0.1 lands on NUM
+SPRINGS**. Instantiated as written it produces **silence**, measured on hardware:
+identical rms to the dry signal attenuated by the wet/dry, and no tail.
+
+The SynthDef's own `metadata` block describes Trem Intensity, Trem Rate,
+Resonance, Num Springs and Tension correctly. The argument list beneath it does
+not match its own documentation.
+
+**Verified fixed.** With the plugin copied into `/usr/lib/ladspa` and a
+definition using the real port order, scsynth reports
+`LADSPA: Found plugin 29153 (Eventide Spring)` at boot and the effect works. A
+0.35 s pluck that leaves **0.00 s** of tail dry leaves **0.18 s** through it.
+
+**Fix, three parts.**
+
+1. Set the environment before `sclang` starts — in `launch-sc-1`, where the
+   server's other environment variables already are — rather than from inside it:
+
+   ```sh
+   LADSPA_PATH=/usr/share/las-fx/ladspa DISPLAY=:0 SCSYNTH_IP=$scip ... sclang ...
+   ```
+
+2. Correct `et_spring`'s argument list to the plugin's ports. The working
+   definition is in `patches/0003-et-spring-correct-ports.scd`.
+
+3. Compile it with the rest, so `loadDirectory` finds it.
 
 ---
 
