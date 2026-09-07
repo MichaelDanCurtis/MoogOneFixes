@@ -1,0 +1,24 @@
+=== IPU faults across boots (from /var/log/messages)
+Sep  7 12:26:54 las-production user.warn kernel: imx-ipuv3 2400000.ipu: IPU Warning - IPU_INT_STAT_10 = 0x00080000
+Sep  7 12:26:54 las-production user.warn kernel: imx-ipuv3 2400000.ipu: IPU Warning - IPU_INT_STAT_5 = 0x00800000
+Sep  7 18:04:49 las-production user.warn kernel: imx-ipuv3 2400000.ipu: IPU Warning - IPU_INT_STAT_10 = 0x00080000
+
+=== realtime priorities
+prio 99  posixcputmr/1
+prio 99  posixcputmr/0
+prio 99  migration/1
+prio 99  migration/0
+prio 99  irq/284-sdma
+prio 94  scsynth
+prio 93  ipu1_task
+prio 93  ipu1_task
+prio 89  irq/26-esai
+prio 80  irq/298-2400000
+prio 80  irq/297-2400000
+prio 51  irq/290-s-mmc2
+
+=== service key gating
+Mon Sep  7 09:25:54 UTC 2026 : DROPBEAR : You have a key! Aren't you special!
+Mon Sep  7 09:25:54 UTC 2026 : S99 : You have a key! Aren't you special!
+Mon Sep  7 14:31:42 UTC 2026 : DROPBEAR : You have a key! Aren't you special!
+Mon Sep  7 14:31:42 UTC 2026 : S99 : You have a key! Aren't you special!

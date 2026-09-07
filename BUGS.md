@@ -165,8 +165,33 @@ than a default anyone should apply blindly.
 [12844.843490] imx-ipuv3 2400000.ipu: IPU Warning - IPU_INT_STAT_10 = 0x00080000
 ```
 
-The last kernel message before a reported UI lock-up, roughly two minutes before
-the unit was inspected. `INT_STAT_10` is an IPU error-interrupt register.
+**It recurs.** `dmesg` holds only the current boot, and `/var/log/messages` shows
+it has happened on more than one:
+
+```
+Sep  7 12:26:54  IPU Warning - IPU_INT_STAT_10 = 0x00080000
+Sep  7 12:26:54  IPU Warning - IPU_INT_STAT_5  = 0x00800000
+Sep  7 18:04:49  IPU Warning - IPU_INT_STAT_10 = 0x00080000
+```
+
+Two separate events on two different boots, and the first raised a second error
+register alongside it. `INT_STAT_10` and `INT_STAT_5` are IPU error-interrupt
+registers. The 18:04 one is the last kernel message before a reported UI lock-up.
+
+**A scheduling detail that may or may not be related, offered because it is
+cheap to check.** `S99final` puts the IPU threads on `SCHED_FIFO` at priority 93
+via `chrt -f -p`, directly below `scsynth` at 94:
+
+```
+  prio 94  scsynth
+  prio 93  ipu1_task  (x2)
+  prio 89  irq/26-esai
+  prio 80  irq/297-2400000, irq/298-2400000
+```
+
+Realtime tasks share one budget, and this unit logged `sched: RT throttling
+activated` (finding 4). Display and audio are adjacent priorities drawing on the
+same throttled budget.
 
 At the time: network responsive, `scsynth` answering normally with a full effects
 graph, no process in uninterruptible sleep, no OOM kill, `las-frontend` consuming
@@ -193,6 +218,92 @@ is not there is worse than no report.
 
 ---
 
+## 7. Service mode gives unauthenticated root over the network — CONFIRMED
+
+**Not a shipped default, and the distinction matters.** A stock unit runs no SSH
+at all. `S50dropbear` starts the daemon *only* when a key file is present:
+
+```sh
+if [ -e /media/thumbdrive/k ]; then
+    keyval=`hexdump /media/thumbdrive/k | awk '{print $3 $2}'`
+    if [ $keyval = 23051934 ]; then
+        ... start-stop-daemon -S -q ... --exec /usr/sbin/dropbear ...
+```
+
+**But `/etc/shadow` ships with the root password empty** — the file is dated
+2022-05-16, i.e. build time, and the entry is `root::10933:0:99999:7:::`. So once
+that key enables `dropbear`, root is reachable from anywhere on the LAN with no
+credential at all. Verified from another machine:
+
+```
+ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password root@<unit>
+  -> logged in as root, no key and no password
+```
+
+There is no `authorized_keys` on the unit; `/root/.ssh` is empty.
+
+**The gate is one fixed constant.** `23051934` is a compile-time value, the same
+on every unit, checked identically by `S50dropbear` and `S99final`. It needs
+physical access to place a file on removable media, which is a real limit on
+severity — but it is a product-wide shared secret, so it is secret exactly once.
+
+**Suggested fix.** Give root a password, or require a key for SSH, even in
+service mode; and derive the service token per unit rather than sharing one
+constant across the product line. The convenience of the current arrangement is
+preserved by shipping a per-unit token with the unit.
+
+---
+
+## 8. `mount -f -o remount,ro /` may never remount anything — HYPOTHESIS
+
+`S99final` ends, on units *without* a service key, with:
+
+```sh
+#no key or hot key press was found so kill xterms, dwm, and mount root RO
+killall xterm;
+killall las-dwm;
+mount -f -o remount,ro /
+```
+
+The intent is explicit in the comment. But `-f` is BusyBox mount's *fake* flag —
+everything except the actual mount syscall — so the remount would be a no-op and
+root would stay writable. On an instrument that is switched off at the back, a
+writable root filesystem is an unclean-shutdown corruption risk, and it is
+presumably why the line is there.
+
+**Not confirmed, because it could not be tested here:** this unit has a service
+key, so `S99final` exits before reaching that line, and its root is writable for
+that reason instead.
+
+**The test:** on a unit with no key on the thumbdrive, after a normal boot, run
+`grep " / " /proc/mounts`. If it says `rw`, the remount did not take.
+
+---
+
+## 9. RT priority is assigned by an unanchored `ps | grep` — OBSERVED
+
+`S99final` again:
+
+```sh
+iputasks=`ps | grep ipu | awk  '{print $1} NR==2{exit}'`
+ipuirq=`ps | grep 2400000 | awk  '{print $1} NR==2{exit}'`
+assign_ipu_pri $iputasks 93
+assign_ipu_pri $ipuirq 80
+```
+
+`assign_ipu_pri` takes three positional arguments and is called with two, which
+works only because each variable is unquoted and happens to expand to exactly two
+PIDs. That in turn depends on `ps | grep ipu` matching exactly the two `ipu1_task`
+threads and nothing else, with no anchoring and no filter on the process name
+column.
+
+On this unit it landed correctly. It is listed because the failure mode is quiet
+and bad: a different match count silently gives `chrt -f -p` the wrong arguments,
+or puts `SCHED_FIFO` priority 93 on an unrelated process. Matching on the command
+column explicitly, and checking the count before using it, costs two lines.
+
+---
+
 ## RETRACTED — `inputRouter` writes 56-59, `outputRouter` reads 60-63
 
 Reading `synthdefs.scd`, `inputRouter` ends with `Out.ar(56..59, ...)` while
@@ -214,3 +325,22 @@ and 60-63 are their *outputs*; the chain meets through the effect in between.
 56 and 57 measured silent because send 1 held `none_2`, which passes nothing, and
 58/59 carried signal because send 2 held a live shimmer. **A bus that reaches
 nothing is not evidence of a broken graph when a no-op effect is sitting in it.**
+
+---
+
+## RETRACTED — "the supervisor is not running", "root is writable", "X is still up"
+
+All three are true on this unit and none is a defect. They are the documented
+consequence of the service key in finding 7: `S99final` finds the key, logs
+`You have a key! Aren't you special!`, runs `killall las-watchdog` and **exits
+early** — skipping `killall xterm`, `killall las-dwm` and the root remount.
+
+So on a stock unit `las-watchdog -t=10000` *is* running, checking `las-frontend`,
+`las-sc`, `sclang` and `scsynth` on a ten-second timer with the ability to restart
+X and `las-dwm`. Reporting its absence as a robustness defect would have been
+wrong, and reporting an empty root password as a shipped network exposure would
+have been wrong in the other direction — the SSH daemon that exposes it is itself
+gated by the same key.
+
+Worth knowing separately: because service mode disables it, the supervisor that
+might have caught the UI lock-up was not running when the lock-up happened.
