@@ -153,10 +153,18 @@ each period. Exceed it and the throttle fires. Logged once, 17 minutes after boo
 on a unit doing nothing unusual.
 
 **It is reachable in normal use, and it is audible.** Engaging one more effect on
-an ordinary patch took `scsynth` from 72% to 101% of a core and the output cut out
+an ordinary patch at 72% of a core took it past the throttle and the output cut out
 for about a tenth of a second at a time -- reported by ear before any measurement
-found it. The five Eventide LADSPA reverbs cost **25-31% of a core each**;
-everything else in the rack costs 2-5%.
+found it. The five Eventide LADSPA reverbs cost **23-33% of a core each**;
+everything else in the rack costs 1-10%, the 21-band vocoder being the one native
+effect worth watching at 10%.
+
+*A note on the arithmetic.* An earlier version of this report put the total at
+"101% of a core". That was 72 + 29 rather than a reading: a thread cannot exceed one
+core, and this one is descheduled near 95% by the very throttle being described. The
+demand exceeds the core; the measurement cannot. The effect costs themselves have
+since been re-measured on an idle engine with a per-thread probe and stand up --
+`et_plate_1` at +26%, against +27% by the original method.
 
 **The block size is the lever, and it is one line.** `init_sc_1.scd` runs the
 engine at `blockSize = 128`. At 256:
@@ -168,15 +176,15 @@ engine at `blockSize = 128`. At 256:
 
 That is 21 points of a core handed back for 2.7 ms of extra block latency, and it
 is per-block overhead rather than any one synth: `et_plate_1` costs +29% at 128
-and +27% at 256. With it, the same sixth effect that measured 101% and dropped out
-measures 79% and plays clean -- zero dropouts over 20 ms across a recorded phrase.
+and +27% at 256. With it, the same sixth effect that dropped out
+plays clean -- zero dropouts over 20 ms across a recorded phrase.
 
 **Two suggestions, in order.** Ship a larger default block size, or expose it; a
 product whose own reverbs cannot be added to its own patches without dropouts is
 running too close to the edge to be tuned by the customer. And separately,
 `scripts/apply.sh rt-throttle` raises the realtime budget -- but the tradeoff is
 real and it is not ours to make: an unbounded budget means a spinning RT thread
-can lock the machine out. At a genuine 101% it only moves the cliff anyway.
+can lock the machine out. When demand genuinely exceeds one core it only moves the cliff anyway.
 
 ---
 
@@ -406,32 +414,148 @@ definition using the real port order, scsynth reports
 
 ---
 
-## 11. The two-server configuration cannot run — CONFIRMED
+## 11. The two-server configuration cannot run — CONFIRMED, and the cause is the build
 
 `init_sc_2.scd` describes exactly the architecture this hardware needs, in its own
 comment: `// frontendGroup lives on shared CPU core, dspGroup lives on DSP core`.
-It is unreachable in four independent ways, listed because any one of them alone
-would be a small fix and together they suggest it was abandoned rather than
-finished:
 
-* **Nothing selects it.** `launch-sc-2` is a byte-for-byte copy of `launch-sc-1`,
-  including the banner `LAUNCHING SINGLE EFFECTS SERVER CONFIGURATION`, and loads
-  `init_sc_1.scd`. No file on the device references `init_sc_2.scd`.
+**Why this matters.** Measured over three seconds on an otherwise quiet instrument:
+
+```
+cpu     busy  12.1%
+cpu0    busy  12.6%      <- all the audio
+cpu1    busy  11.6%      <- and under load this one stays near idle
+```
+
+Under a loaded patch cpu0 saturates while cpu1 remains roughly 87% idle. A single
+Eventide reverb costs 23-33% of one core (finding 4). The second core of a two-core
+machine is not used for audio at all, and that is the difference between a reverb
+that fits and one that does not.
+
+Four faults keep the configuration unreachable, and all four are repairable:
+
+* **Nothing selects it.** `launch-sc-2` is a **symlink to `launch-sc-1`** — same
+  md5, same banner `LAUNCHING SINGLE EFFECTS SERVER CONFIGURATION` — and so loads
+  `init_sc_1.scd`. `init_sc_2.scd` is present and is the larger file (7205 bytes
+  against 4136). The launcher named for this configuration points at its sibling.
 * **`~dspGroup` is used at lines 68-69 and defined at line 77**, so the input and
   output routers are created against `nil`.
-* **`~serverANumOuts = 4`**, but the main outputs are buses 0 and 7. Bus 7 does
-  not exist on `server_a`.
-* **No JACK.** Two servers cannot share the card without it, and `init_sc_2.scd`
-  does not start `jackd`. The two scripts that do, `launch-sc` and `launch-sn`,
-  both `cd /usr/share/efx` — **and that directory does not exist on the device.**
+* **`~serverANumOuts = 4`**, but the main outputs are buses 0 and 7. Bus 7 does not
+  exist on `server_a`.
+* **`launch-sn`** would start `supernova`, the multicore server that is the right
+  answer here. Its `supernova` line is commented out, it `cd`s into
+  `/usr/share/efx` which does not exist, and it starts `jackd -dalsa -dhw:4` when
+  the only card present is card 0. **No `supernova` binary is installed.**
 
-`launch-sn` would launch `supernova`, SuperCollider's multicore server, which is
-the correct answer to finding 4's CPU ceiling. **No `supernova` binary is
-installed.**
+**None of those is the reason it cannot work.** Underneath all four:
 
-**Why this matters now.** Finding 4 shows a single Eventide reverb taking an
-ordinary patch from 72% to 101% of one core. The i.MX6 has two. Nothing in the
-shipped configuration uses the second one for audio.
+> **The shipped `scsynth` is an ALSA-only build.** `SC_AlsaDriver` is present;
+> `SC_JackDriver` appears **zero** times.
+
+`jackd` *is* installed at `/usr/bin/jackd` — an earlier version of this report said
+it was absent, which was wrong — but `scsynth` cannot be a JACK client, so it cannot
+help. And two ALSA clients cannot share this card:
+
+```
+card 0 [xmosaudio]   the only card
+pcm0p                subdevices_count: 1    subdevices_avail: 0
+hw_params            access: RW_INTERLEAVED (not MMAP)
+                     8ch S24_LE 48000, period 256, buffer 512
+/usr/lib/alsa-lib/   smixer only            (no dmix plugin)
+/etc/asound.conf     empty
+```
+
+One subdevice, already held. `dmix` is the way to share an ALSA device and it
+requires mmap on the slave, which this driver does not offer — and the plugin is not
+installed regardless. No `snd-aloop` module either.
+
+**What would fix it.** Any one of three, and each is a new binary on the device:
+
+1. Ship `scsynth` built with the JACK driver, and start `jackd` on card 0 rather
+   than `hw:4`.
+2. Ship the `supernova` binary `launch-sn` already expects.
+3. Give the `xmos-audio` driver mmap support so `dmix` can share the card.
+
+No script edit reaches this. It is not an abandoned configuration so much as a
+configuration for a build that was not shipped.
+
+**Verification**
+
+```sh
+strings /usr/bin/scsynth | grep -c SC_JackDriver     # 0
+strings /usr/bin/scsynth | grep -c SC_AlsaDriver     # non-zero
+cat /proc/asound/card0/pcm0p/info | grep subdevices  # count 1, avail 0
+cat /proc/asound/card0/pcm0p/sub0/hw_params          # access: RW_INTERLEAVED
+ls /usr/lib/alsa-lib/                                # smixer only
+ls -l /usr/share/las-fx/launch-sc-2                  # -> launch-sc-1
+```
+
+---
+
+## 12. `scsynth` reports its CPU usage as exactly zero — CONFIRMED
+
+`/status.reply` carries `avg_cpu` and `peak_cpu`. On this firmware both are
+**exactly `0.000`**, always, including while the server's own DSP thread is using
+82% of a core.
+
+```
+status 0: avg=0.000 peak=0.000 ugens=710 synths=19 groups=12 defs=110 sr=48000.0
+status 1: avg=0.000 peak=0.000 ugens=710 synths=19 groups=12 defs=110 sr=48000.0
+status 2: avg=0.000 peak=0.000 ugens=710 synths=19 groups=12 defs=110 sr=48000.0
+status 3: avg=0.000 peak=0.000 ugens=710 synths=19 groups=12 defs=110 sr=48000.0
+```
+
+Measured against the kernel over the same period, the busiest `scsynth` thread was
+at 82% of one core. Every other field in the same reply is correct — ugens, synths,
+groups, synthdefs, sample rate — so this is not a broken reply, it is two dead
+fields inside a working one.
+
+**Why this matters.** This instrument runs `scsynth` `SCHED_FIFO` against a 95% RT
+throttle (finding 4), so CPU headroom is the thing most worth watching, and it is
+the one number the server will not report. Any monitoring built on the documented
+SuperCollider interface — including Moog's own, if it uses it — sees an idle
+machine right up to the moment the audio drops out.
+
+**Workaround**, if anything needs the real figure: read it from the kernel. The
+DSP is one thread, and the throttle acts per thread, so the busiest thread is the
+number:
+
+```sh
+pid=$(ps | grep '[s]csynth -u' | awk '{print $1}' | head -1)
+{ cat /proc/stat; cat /proc/$pid/task/*/stat; } > /tmp/a
+sleep 2
+{ cat /proc/stat; cat /proc/$pid/task/*/stat; } > /tmp/b
+# busiest thread's jiffies / (total jiffies / ncores) = share of one core
+```
+
+Two traps for anyone reproducing this. **busybox `top` on this device reports
+`%CPU` as a fraction of both cores** — it shows 42% for the thread measured above
+at 82% of one. And **an effect's cost cannot be measured on a busy engine**: at an
+82% baseline every Eventide reverb measured 12-15%, consistently enough across all
+five to look like a result, because 82% plus a reverb is past the throttle and the
+kernel caps the thread. On an idle engine the same five measure 23-33%.
+
+---
+
+## 13. `las-sc` sends `/hw/` addresses the controller does not serve — OBSERVED
+
+`las-sc` contains three `/hw/` leaves. Queried on the voice controller:
+
+```
+/hw/mute      ack                          <- served
+/hw/hpf       404 Not found
+/hw/autor     404 Not found
+```
+
+`/info/product` returns `lasvc` and a deliberately invalid address returns 404, so
+the harness is sound in both directions. Minor, and listed only because it is
+evidence about how much of `las-sc`'s address table is live — relevant to anyone
+reading that binary to learn the namespace.
+
+Also observed while testing: **`/hw/mute` acknowledges a zero-argument message**
+rather than returning `400 Malformed message`, which the same firmware does return
+for genuinely malformed input. The instrument went on playing normally afterwards,
+so the message matched a setter and did not write.
 
 ---
 
