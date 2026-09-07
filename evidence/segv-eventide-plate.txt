@@ -1,0 +1,29 @@
+[15520.167046] potentially unexpected fatal signal 11.
+[15520.167069] CPU: 1 PID: 1337 Comm: scsynth Tainted: G        W       4.1.15-rt18 #1
+[15520.167073] Hardware name: Freescale i.MX6 Quad/DualLite (Device Tree)
+[15520.167078] task: 86f36a40 ti: 87600000 task.ti: 87600000
+[15520.167085] PC is at 0x757d6bd6
+[15520.167089] LR is at 0x757dcb75
+[15520.167096] pc : [<757d6bd6>]    lr : [<757dcb75>]    psr: 000f0030
+               sp : 6d24e870  ip : 75824428  fp : 014cc620
+[15520.167100] r10: 00000000  r9 : 014c5e20  r8 : 00000000
+[15520.167104] r7 : 0000001c  r6 : 014c998c  r5 : 6aa489f8  r4 : 014c9a18
+[15520.167108] r3 : 6a9df008  r2 : 0001a67c  r1 : 014c9990  r0 : 014c9a58
+[15520.167113] Flags: nzcv  IRQs on  FIQs on  Mode USER_32  ISA Thumb  Segment user
+[15520.167117] Control: 10c53c7d  Table: 170e004a  DAC: 00000015
+[15520.167123] CPU: 1 PID: 1337 Comm: scsynth Tainted: G        W       4.1.15-rt18 #1
+[15520.167126] Hardware name: Freescale i.MX6 Quad/DualLite (Device Tree)
+[15520.167156] [<80016744>] (unwind_backtrace) from [<80012700>] (show_stack+0x10/0x14)
+[15520.167170] [<80012700>] (show_stack) from [<806ba400>] (dump_stack+0x7c/0x90)
+[15520.167188] [<806ba400>] (dump_stack) from [<8003d4ec>] (get_signal+0x288/0x6a4)
+[15520.167203] [<8003d4ec>] (get_signal) from [<80011e6c>] (do_signal+0x80/0x39c)
+[15520.167214] [<80011e6c>] (do_signal) from [<80012328>] (do_work_pending+0x90/0xa0)
+[15520.167223] [<80012328>] (do_work_pending) from [<8000f498>] (work_pending+0xc/0x20)
+
+--- library mapping, from /proc/<scsynth>/maps taken before the crash ---
+757b2000-75815000 r-xp 00000000 b3:03 6475       /usr/lib/ladspa/eventide_plate.so
+75815000-7581d000 ---p 00063000 b3:03 6475       /usr/lib/ladspa/eventide_plate.so
+7581d000-75827000 rw-p 00063000 b3:03 6475       /usr/lib/ladspa/eventide_plate.so
+759c5000-759c7000 r-xp 00000000 b3:03 2825       /usr/lib/SuperCollider/plugins/LadspaUGen.so
+759c7000-759d6000 ---p 00002000 b3:03 2825       /usr/lib/SuperCollider/plugins/LadspaUGen.so
+759d6000-759d7000 rw-p 00001000 b3:03 2825       /usr/lib/SuperCollider/plugins/LadspaUGen.so

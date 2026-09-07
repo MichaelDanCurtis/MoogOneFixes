@@ -8,64 +8,70 @@ scsynth -u 57110 -a 129 -i 9 -b 1026 -z 128 -Z 128 -m 100000 -w 128 -S 48000 -R 
 
 ---
 
-## 1. `/n_free` on any LADSPA effect synth terminates `scsynth` — CONFIRMED
+## 1. `/n_free` on a LADSPA effect synth faults inside `eventide_plate.so` — CONFIRMED
 
 **Impact.** The audio engine dies. The instrument keeps running and its screen and
-controls respond, but it produces no digital effects at all until the service is
+controls respond, but it produces no digital effects until the service is
 restarted. Reachable from any OSC client that can talk to port 57110.
 
-**Reproduction.** Nothing else running, on a freshly booted unit:
+**Intermittent, and that matters for reproducing it.** It is not one-shot. In the
+run that produced the fault below, the first `/n_free` completed cleanly and the
+second crashed the server. An earlier session hit it twice out of two in
+isolation, and twice more by accident. `repro/ladspa_free_crash.py` therefore
+retries rather than giving up after one attempt.
+
+**Reproduction.** On a freshly booted unit, with nothing else running:
 
 ```
-/s_new  "et_plate_1" 96500 0 0 "inBus" 100 "outBus" 102
+/s_new  "et_plate_1" <node> 0 0 "inBus" 100.0 "outBus" 102.0
 /sync
-/status                     -> answers, ugen count risen by 28
-/n_free 96500
-/status                     -> no reply, ever again
+/n_free <node>            # repeat until the server stops answering
 ```
 
-Two out of two in isolation. It also happened twice by accident before it was
-isolated, and each time the cause was misattributed to something else first.
+Buses above 63 are unused by the instrument's own graph, so the effect processes
+nothing of the user's and no patch is modified.
 
-`repro/ladspa_free_crash.py` is this, self-contained.
+**The fault.** Captured with `kernel.print-fatal-signals = 1`, and the process's
+`/proc/<pid>/maps` saved beforehand, because the mapping dies with the process:
 
-**Why this is never hit in normal use.** `efx_server.scd` creates the five effect
+```
+potentially unexpected fatal signal 11.
+CPU: 1 PID: 1337 Comm: scsynth Tainted: G        W       4.1.15-rt18 #1
+PC is at 0x757d6bd6
+LR is at 0x757dcb75
+Flags: nzcv  IRQs on  FIQs on  Mode USER_32  ISA Thumb  Segment user
+```
+
+Against the saved map, `eventide_plate.so` is mapped `757b2000-75815000 r-xp`:
+
+| register | address | library | file offset |
+|---|---|---|---|
+| PC | `0x757d6bd6` | `/usr/lib/ladspa/eventide_plate.so` | **+0x24bd6** |
+| LR | `0x757dcb75` | `/usr/lib/ladspa/eventide_plate.so` | **+0x2ab75** |
+
+**Both the faulting instruction and its return address are inside
+`eventide_plate.so`.** The crash is in the Eventide plugin's own code, reached
+through `LadspaUGen`'s destructor, which calls `deactivate()` and then `cleanup()`
+on the plugin handle. It is not in `LadspaUGen.so` and not in `scsynth`.
+
+Those two offsets should resolve to functions immediately against an unstripped
+build. Full log in `evidence/segv-eventide-plate.txt`.
+
+**Why it is never hit in normal use.** `efx_server.scd` creates the five effect
 slots once during `waitForBoot` and stops them with `enable = 0` — whose envelope
 is `EnvGen.kr(Env.asr(0.1, 1, 2), enable, doneAction: 1)`, and doneAction 1 is
-*pause*. Nothing in the shipped firmware ever frees one, so the free path is the
-part of these units' lifecycle that the product never exercises.
+*pause*. Nothing in the shipped firmware ever frees one, so `deactivate()` and
+`cleanup()` are entry points the product never calls.
 
-**Where it is.** `LadspaUGen.so` is built from `sc3-plugins`
-(`source/LadspaUGen/LadspaUGen.cpp`), whose destructor is:
-
-```c
-void LADSPA_Dtor(LADSPA *unit)
-{
-    if(!unit->desc) return;
-    if(unit->desc->deactivate)
-        unit->desc->deactivate(unit->handle);
-    unit->desc->cleanup(unit->handle);
-}
-```
-
-That code contains a **separate, provable defect**: `LADSPA_Ctor` assigns
-`unit->desc` *before* calling `instantiate()`, never checks the result, and the
-LADSPA specification explicitly permits `instantiate()` to return NULL. A unit
-that failed to instantiate therefore has a valid `desc` and a NULL `handle`, and
-the guard above lets it through to `deactivate(NULL)` and `cleanup(NULL)`. The
-same NULL handle is also passed to `connect_port()` and `activate()` in the
-constructor. **`patches/0001-ladspa-null-handle.patch` fixes that.**
-
-**It is probably not what crashed here, and that matters.** In this reproduction
-the effect had been instantiated successfully and was audibly processing audio, so
-the handle was valid. The fault is therefore most likely inside the Eventide
-plugin's own `deactivate()`/`cleanup()` — `las-fx/ladspa/eventide_*.so`, which are
-proprietary and, per the paragraph above, have never had those entry points called
-in shipping firmware.
-
-**What would settle it:** one reproduction with core dumps enabled
-(`scripts/enable-core-dumps.sh`) gives a backtrace naming the faulting library and
-function. That has not been run; it costs one deliberate crash.
+**`patches/0001-ladspa-null-handle.patch` does NOT fix this, and is offered
+anyway.** It fixes a real and separate defect in the same destructor path:
+`LADSPA_Ctor` assigns `unit->desc` *before* calling `instantiate()`, never checks
+the result — which the LADSPA specification explicitly permits to be NULL — and
+the destructor guards `desc` rather than `handle`. A unit whose instantiate failed
+therefore reaches `deactivate(NULL)` and `cleanup(NULL)`, and the same NULL handle
+is passed to `connect_port()` and `activate()` in the constructor. That is not
+what happened here: the effect had instantiated successfully and was audibly
+processing audio, so its handle was valid.
 
 ---
 
