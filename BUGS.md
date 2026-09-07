@@ -469,15 +469,35 @@ One subdevice, already held. `dmix` is the way to share an ALSA device and it
 requires mmap on the slave, which this driver does not offer — and the plugin is not
 installed regardless. No `snd-aloop` module either.
 
-**What would fix it.** Any one of three, and each is a new binary on the device:
+**JACK works on this hardware. Tested.** Stopping the audio stack and starting the
+`jackd` that already ships, on the card that actually exists:
 
-1. Ship `scsynth` built with the JACK driver, and start `jackd` on card 0 rather
-   than `hw:4`.
-2. Ship the `supernova` binary `launch-sn` already expects.
-3. Give the `xmos-audio` driver mmap support so `dmix` can share the card.
+```
+jackd -d alsa -d hw:0 -r 48000 -p 256 -n 2
 
-No script edit reaches this. It is not an abandoned configuration so much as a
-configuration for a build that was not shipped.
+JACK server starting in realtime mode with priority 10
+configuring for 48000Hz, period = 256 frames (5.3 ms), buffer = 2 periods
+ALSA: final selected sample format for capture:  24bit little-endian
+ALSA: final selected sample format for playback: 24bit little-endian
+```
+
+`jackdmp 1.9.12`. It took the card, matched its 24-bit format in both directions,
+published all 8 capture and 8 playback ports, and ran with **zero xruns** in
+realtime mode at a 5.3 ms period. `S42sc restart` restored the instrument normally
+afterwards.
+
+Two further faults in `launch-sn` follow from that, now demonstrated rather than
+suspected: it asks for **`-dhw:4`** when the only card is `hw:0`, and it passes
+**`-S`**, JACK's *16-bit shorts* flag, to a card whose format is `S24_LE`.
+
+**What would fix it is one binary, not three.** Ship a `scsynth` built with the JACK
+driver — or the `supernova` that `launch-sn` already expects — and correct
+`launch-sn`'s card and format flags. The sharing layer is already on the device,
+already works, and is not used by anything.
+
+For a customer this is out of reach: there is no compiler on the instrument, and the
+sysroot is armv7l against glibc 2.21 (Buildroot, 2015) on a 4.1.15-rt kernel. For
+whoever builds the image it is a build-flag change.
 
 **Verification**
 
