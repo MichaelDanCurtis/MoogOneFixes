@@ -152,10 +152,31 @@ an audio dropout.
 each period. Exceed it and the throttle fires. Logged once, 17 minutes after boot,
 on a unit doing nothing unusual.
 
-**Fix.** `scripts/apply.sh rt-throttle` raises the budget, with the tradeoff
-stated in the script: an unbounded realtime budget means a spinning RT thread can
-lock the machine out, so this is a decision for whoever owns the product rather
-than a default anyone should apply blindly.
+**It is reachable in normal use, and it is audible.** Engaging one more effect on
+an ordinary patch took `scsynth` from 72% to 101% of a core and the output cut out
+for about a tenth of a second at a time -- reported by ear before any measurement
+found it. The five Eventide LADSPA reverbs cost **25-31% of a core each**;
+everything else in the rack costs 2-5%.
+
+**The block size is the lever, and it is one line.** `init_sc_1.scd` runs the
+engine at `blockSize = 128`. At 256:
+
+| graph | `-z 128` | `-z 256` |
+|---|---|---|
+| bare default, 496 ugens | 22% | **17%** |
+| a real patch, 682 ugens, five effects routed | 72% | **51%** |
+
+That is 21 points of a core handed back for 2.7 ms of extra block latency, and it
+is per-block overhead rather than any one synth: `et_plate_1` costs +29% at 128
+and +27% at 256. With it, the same sixth effect that measured 101% and dropped out
+measures 79% and plays clean -- zero dropouts over 20 ms across a recorded phrase.
+
+**Two suggestions, in order.** Ship a larger default block size, or expose it; a
+product whose own reverbs cannot be added to its own patches without dropouts is
+running too close to the edge to be tuned by the customer. And separately,
+`scripts/apply.sh rt-throttle` raises the realtime budget -- but the tradeoff is
+real and it is not ours to make: an unbounded budget means a spinning RT thread
+can lock the machine out. At a genuine 101% it only moves the cliff anyway.
 
 ---
 
