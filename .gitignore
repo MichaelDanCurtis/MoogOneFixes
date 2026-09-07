@@ -1,0 +1,4 @@
+# Built artefacts. LadspaUGen.so has to be compiled against the unit's own
+# toolchain, and a binary in here would be for the wrong ABI more often than not.
+*.so
+*.o

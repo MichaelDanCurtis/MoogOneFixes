@@ -1,0 +1,33 @@
+--- a/server/scsynth/scsynth_main.cpp
++++ b/server/scsynth/scsynth_main.cpp
+@@ -24,6 +24,7 @@
+ #include "SC_EventLoop.hpp"
+ #include "SC_ServerBootDelayWarning.h"
+ #include <cstring>
++#include <csignal>
+ #include <stdio.h>
+ #include <stdarg.h>
+ #include <stdlib.h>
+@@ -159,6 +160,22 @@
+ 
+     setlinebuf(stdout);
+ 
++#ifndef _WIN32
++    // scsynth writes to sockets and to files that may be pipes, and it does not
++    // own the far end of either. With SIGPIPE at its default disposition, a
++    // reader going away TERMINATES THE SERVER: the write never returns EPIPE,
++    // there is no error to handle, and the audio simply stops.
++    //
++    // Observed on an embedded host where /b_write targeted a FIFO and DiskOut
++    // streamed into it. The consumer on the other end exited and took the audio
++    // engine with it -- from the outside indistinguishable from a crash, and
++    // reproducible by quitting any application that streams from the server.
++    //
++    // Ignoring it makes the write fail with EPIPE, which the socket and file
++    // paths already report through their normal error handling.
++    signal(SIGPIPE, SIG_IGN);
++#endif
++
+     EventLoop::setup();
+ 
+     int udpPortNum = -1;

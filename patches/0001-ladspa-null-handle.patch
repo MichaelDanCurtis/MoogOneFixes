@@ -1,0 +1,40 @@
+--- a/source/LadspaUGen/LadspaUGen.cpp
++++ b/source/LadspaUGen/LadspaUGen.cpp
+@@ -72,6 +72,19 @@
+ 
+     unit->handle = unit->desc->instantiate(unit->desc,SAMPLERATE);
+ 
++    if(!unit->handle) {
++        // The LADSPA spec permits instantiate() to return NULL on failure. Without
++        // this check the connect_port() calls below, activate(), and later both
++        // deactivate() and cleanup() in the destructor are all made on a NULL
++        // handle. desc is already non-NULL by this point, so the destructor's
++        // `if(!unit->desc) return;` guard does not catch it.
++        Print("LADSPA: ERROR, plugin %lu failed to instantiate!\n",key.UniqueID);
++        unit->desc = NULL;
++        unit->mDone = true;
++        SETCALC(ClearUnitOutputs);
++        return;
++    }
++
+     int in_index = 2, out_index = 0;
+     for(unsigned long i = 0; i < unit->desc->PortCount; i++) {
+         if(LADSPA_IS_PORT_INPUT(unit->desc->PortDescriptors[i])) {
+@@ -94,10 +107,15 @@
+ 
+ void LADSPA_Dtor(LADSPA *unit)
+ {
+-    if(!unit->desc) return;
++    // Guard the HANDLE, not just the descriptor. A unit whose instantiate()
++    // failed has a valid desc and a NULL handle, and passing that to the
++    // plugin's deactivate()/cleanup() is undefined.
++    if(!unit->desc || !unit->handle) return;
+     if(unit->desc->deactivate)
+         unit->desc->deactivate(unit->handle);
+-    unit->desc->cleanup(unit->handle);
++    if(unit->desc->cleanup)
++        unit->desc->cleanup(unit->handle);
++    unit->handle = NULL;
+ }
+ 
+ void LADSPA_next( LADSPA *unit, int inNumSamples ) {
