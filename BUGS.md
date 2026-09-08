@@ -179,9 +179,26 @@ is per-block overhead rather than any one synth: `et_plate_1` costs +29% at 128
 and +27% at 256. With it, the same sixth effect that dropped out
 plays clean -- zero dropouts over 20 ms across a recorded phrase.
 
-**Two suggestions, in order.** Ship a larger default block size, or expose it; a
-product whose own reverbs cannot be added to its own patches without dropouts is
-running too close to the edge to be tuned by the customer. And separately,
+**RETRACTED, in part — the block size is not the problem, and 128 is correct.**
+
+The dropouts that motivated this were produced by a *sixth* effect added alongside
+the instrument's own five-slot rack. The instrument budgets for five. Adding one
+more and concluding the block size is wrong inverts cause and effect.
+
+And 128 is right for this design. Insert effects read straight from the ADC
+(`input = SoundIn.ar(inBus, 2)`), so a timbre routed through one takes the whole
+ADC→DAC round trip while a timbre without one goes out in analog with none. Doubling
+the block doubles that skew — roughly 8-11 ms to 16-21 ms between two timbres played
+together, which is the difference between a slight thickening and an audible flam,
+and between "tight" and "behind the keys" for the player.
+
+Moog chose 128 to keep the insert path aligned with the analog path. That is the
+correct trade for an analog instrument with a digital insert loop, and the earlier
+recommendation here to ship a larger default was wrong.
+
+What survives is the underlying observation: the RT throttle is reachable, and the
+headroom above a normal patch is thin. The right response is not a bigger block. It
+is that
 `scripts/apply.sh rt-throttle` raises the realtime budget -- but the tradeoff is
 real and it is not ours to make: an unbounded budget means a spinning RT thread
 can lock the machine out. When demand genuinely exceeds one core it only moves the cliff anyway.
