@@ -708,6 +708,125 @@ watchdog log at every boot — which is why nobody noticed.
 
 ---
 
+## 17. Unauthenticated remote code execution as root — CONFIRMED, SECURITY
+
+**Impact.** Any device on the same network can run arbitrary code as root on the
+instrument, with one UDP packet and no authentication.
+
+`efx_server.scd` line 344, in the handler for `/fx`-family messages:
+
+```supercollider
+if(  msg[2].isNil == true,{
+    ...
+    "Expression found, compiling and executing the following"
+    ...
+    msg[1].asString.interpret;
+```
+
+A message whose **second argument is absent** has its first argument interpreted as
+SuperCollider source and executed. `sclang` runs as root, and SuperCollider can shell
+out (`.systemCmd`, `.unixCmd`), so this is arbitrary command execution.
+
+The port is not local:
+
+```
+$ netstat -lnu | grep 7775
+udp   0   0   0.0.0.0:7775   0.0.0.0:*
+```
+
+`0.0.0.0` — every interface, including the LAN. `las-sc` is started with
+`-f localhost:7775` (`/etc/init.d/S42sc`), but the socket is bound to all addresses.
+
+This appears to be a deliberate development facility — the log line calls it
+"Expression found, compiling and executing" — that was never gated for production.
+
+**Also reachable, and worth auditing together:** `/etc/init.d/S95dhcpd` installs DNAT
+rules forwarding UDP **7770, 7771, 9100 and 9300** from the LAN straight to the XMOS
+voice controller at 203.0.113.2, with `ip_forward` enabled. Verified live; the rules
+are installed twice. Combined with finding 2 — that a microburst on that path wedges
+the USB gadget until power is removed — anything on the network can hard-wedge the
+instrument without authenticating either.
+
+**Suggested fix.** Bind 7775 to `127.0.0.1`, and gate the `interpret` branch behind a
+build flag that is off in shipping firmware. Drop the DNAT rules, or restrict them.
+
+---
+
+## 18. Routing bus effect slot 3 to an aux output puts DC on it at twice full scale — CONFIRMED
+
+**Impact.** A constant, not a signal, on a physical output. On monitors this is a
+DC offset at 2.0 — twice full scale.
+
+`synthdefs.scd`, in `outputRouter`:
+
+```supercollider
+dry_dir4_r = #[0, 0, 0, 0],     // L422: a real, settable control
+...
+dry_dir4 = 1;                   // L476: a bare constant, not a signal
+...
+aux1 = ... + (dry_dir4 * dry_dir4_r[0]);   // L525, and 535/545/555 for aux2-4
+```
+
+`dry_dir1`, `dry_dir2` and `dry_dir3` are `Pan2.ar(In.ar(...))` — audio. `dry_dir4`
+is the integer `1`. It is summed into all four aux outputs, scaled by a routing row
+that defaults to zeros, which is the only reason this is not heard constantly.
+
+That row is written at runtime. `efx_server.scd` L853:
+
+```supercollider
+param_name = ("dry_dir" ++ (unitNum.asInteger + 1).asString ++ "_r").asSymbol;
+~dspOutputWrapper.set(param_name, arr[2..]);
+```
+
+`unitNum` 3 — the first bus/master slot — resolves to **`dry_dir4_r`**. Route that
+slot to any aux and the row goes non-zero.
+
+The scale factor comes from the output stage: the aux sums are arrays (the other
+`dry_dir` terms are stereo), a scalar added to an array broadcasts to both elements,
+and `Out.ar(5, aux1.sum)` adds them. **1 + 1 = 2.0.**
+
+**Suggested fix.** `dry_dir4` should be a signal or the term should be removed. The
+`dry_dir` rows should also be bounded to the three slots that have sources.
+
+---
+
+## 19. `stereoDelay` and `pingpongDelay` diverge to NaN — CONFIRMED
+
+**Impact.** NaN reaching the DAC. On this hardware that is silence at best and a
+full-scale transient at worst, and it persists until the node is replaced.
+
+Both write `sigL * 2` back into their own feedback path with nothing in the loop but
+an `LPF` — no `tanh`, no `clip`, no limiter. Loop gain passes unity above a feedback
+setting of about 0.5 and the buffer diverges to `inf`, then `NaN`.
+
+`pingpongDelay` has a `.tanh`, but it is **outside** the loop: it bounds what reaches
+the bus while the delay buffer still explodes, and `tanh(NaN)` is `NaN`.
+
+The instrument's other two delays do it correctly — `bbdDelay` uses
+`.clip().softclip` and `tapeDelay` uses `.atan`, both **inside** the loop. The fix
+exists in the same file and never reached these two.
+
+**Suggested fix.** Move the saturation inside the feedback path, as `bbdDelay` and
+`tapeDelay` already do.
+
+---
+
+## 20. `et_shimmer` has `highDecay` and `lowDecay` swapped — CONFIRMED
+
+Same class as finding 10 (the spring), and it ships working, so nobody has noticed
+that two front-panel controls drive each other's ports.
+
+The argument list reads `… midDecay, highDecay, lowDecay …` while both the `specs`
+dictionary and the ordered `description` array read `… midDecay, lowDecay, highDecay
+…`. `blackhole`, `room`, `hall` and `plate` were checked port by port and are clean.
+
+**Correction to finding 10:** `et_spring` is not merely mis-argued, it is **commented
+out** in `synthdefs.scd` (`/*` at L3629, `*/` at L3700). That is why no `.scsyndef`
+exists and why `eventide_spring.so` is unreachable — a cleaner explanation than the
+one first given here.
+
+---
+
 ## RETRACTED — `inputRouter` writes 56-59, `outputRouter` reads 60-63
 
 Reading `synthdefs.scd`, `inputRouter` ends with `Out.ar(56..59, ...)` while
