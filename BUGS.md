@@ -579,6 +579,56 @@ so the message matched a setter and did not write.
 
 ---
 
+## 14. A warm `reboot` wedges the USB gadget and needs power removal — CONFIRMED
+
+**Impact.** After `/sbin/reboot`, the instrument comes back with its LEDs lit, its
+OLEDs showing a single line, no main display, and no network. It is not recoverable
+by software: only removing power restores it.
+
+Observed directly. Before the reboot: uptime 65269 s, network up, audio stack
+running, three OLED pages, main display live. After: LEDs on, OLEDs reduced to one
+line, no main display, and no reply on either IP address or over mDNS for more than
+five minutes.
+
+**The single-device explanation.** `2662:800d "LAS internal"` is one USB gadget
+carrying *both* links — `ethext`, the LAN interface, and `usbint`, the path to the
+voice controller at 203.0.113.2. Both symptoms are one failure:
+
+* no `ethext` -> invisible on the network
+* no `usbint` -> the controller cannot reach the voice cards, which is exactly what
+  an OLED reduced to a single line means
+
+This is finding 2's wedge (`SET_CONFIGURATION` refused) reached by a different
+route. Finding 2 reached it with a traffic microburst; a warm reboot reaches it with
+no traffic at all.
+
+**Why it matters more than finding 2.** A burst is avoidable — the toolkit here is
+interlocked against it. `reboot` is a command any engineer types without thinking,
+it is what every remote-administration habit reaches for, and there is nothing on
+the device to warn that it is one-way. An instrument in a rack, rebooted remotely,
+does not come back.
+
+**The safe path exists and is already used.** `/etc/init.d/S42sc restart` cycles the
+whole audio stack — `las-sc`, `sclang`, `scsynth`, the XMOS firmware upload — and
+recovers cleanly every time. It has been run five times in one session here without
+incident. Whatever `reboot` does to the gadget on the way down, `S42sc restart` does
+not do.
+
+**Suggestion.** Either make the shutdown path leave the gadget re-enumerable, or
+have the controller reset it at boot. Failing both, the watchdog is well placed to
+notice that `usbint` never came up and reset the XMOS rather than sit in a state no
+software can leave.
+
+**Reproduction.** Note that this leaves the unit needing physical access.
+
+```sh
+ssh root@<ip> 'sync; /sbin/reboot'
+# LEDs return, OLEDs show one line, no main display, no network.
+# Only a power cycle recovers it.
+```
+
+---
+
 ## RETRACTED — `inputRouter` writes 56-59, `outputRouter` reads 60-63
 
 Reading `synthdefs.scd`, `inputRouter` ends with `Out.ar(56..59, ...)` while
