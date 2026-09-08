@@ -59,7 +59,7 @@ build. Full log in `evidence/segv-eventide-plate.txt`.
 
 **Why it is never hit in normal use.** `efx_server.scd` creates the five effect
 slots once during `waitForBoot` and stops them with `enable = 0` — whose envelope
-is `EnvGen.kr(Env.asr(0.1, 1, 2), enable, doneAction: 1)`, and doneAction 1 is
+is `EnvGen.kr(Env.asr(0.1, 1, 0.1), enable, doneAction: 1)`, and doneAction 1 is
 *pause*. Nothing in the shipped firmware ever frees one, so `deactivate()` and
 `cleanup()` are entry points the product never calls.
 
@@ -110,7 +110,11 @@ was normal and `rx_dropped`/`rx_errors` were both zero — it is not memory
 exhaustion and the driver never discarded a packet. It simply stopped answering.
 
 **No fix offered.** Neither XMOS firmware image on the device contains a USB
-descriptor table or string descriptors, so the gadget stack is not in either of
+descriptor table or string descriptors **in the images as stored on disk** — but
+both are encoded (the controller per-byte bit-reversed, the voice card nibble-swapped)
+and that scan predates knowing it. Decoded, both images DO carry USB descriptor
+material, including the `LAS internal` string this finding quotes below. Treat the
+conclusion that follows as unsupported: the gadget stack may well be in one of
 them and is not reachable from here. `repro/usb-burst-wedge.md` documents the
 reproduction; it is deliberately not a script.
 
@@ -401,7 +405,11 @@ TREM-INTENSITY  TREM-RATE  MOD-LEVEL  RESONANCE  HIGH-DAMP
 LOW-DAMP        NUM SPRINGS  TENSION  DECAY      MIX
 ```
 
-Ten control ports either way, so it maps positionally and compiles cleanly. Every
+Ten control ports either way, so it would map positionally if it were built at all.
+**It is not: the whole SynthDef is commented out** in `synthdefs.scd` (`/*` at L3629,
+`*/` at L3700), which is the real reason no `.scsyndef` exists and the plugin is
+unreachable — a simpler explanation than the `LADSPA_PATH` one this finding opens
+with. Were it uncommented, every
 knob is simply the wrong knob — and `preDelay`'s default of **0.1 lands on NUM
 SPRINGS**. Instantiated as written it produces **silence**, measured on hardware:
 identical rms to the dry signal attenuated by the wet/dry, and no tail.
@@ -431,101 +439,36 @@ definition using the real port order, scsynth reports
 
 ---
 
-## 11. The two-server configuration cannot run — CONFIRMED, and the cause is the build
+## 11. RETRACTED — the second core is used, and this finding had it backwards
 
-`init_sc_2.scd` describes exactly the architecture this hardware needs, in its own
-comment: `// frontendGroup lives on shared CPU core, dspGroup lives on DSP core`.
+**This finding previously told Moog they had left half the machine idle.** It said
+`cpu1` was "roughly 87% idle" and "not used for audio at all", and proposed shipping
+a JACK-capable `scsynth` so the second core could be reached.
 
-**Why this matters.** Measured over three seconds on an otherwise quiet instrument:
-
-```
-cpu     busy  12.1%
-cpu0    busy  12.6%      <- all the audio
-cpu1    busy  11.6%      <- and under load this one stays near idle
-```
-
-Under a loaded patch cpu0 saturates while cpu1 remains roughly 87% idle. A single
-Eventide reverb costs 23-33% of one core (finding 4). The second core of a two-core
-machine is not used for audio at all, and that is the difference between a reverb
-that fits and one that does not.
-
-Four faults keep the configuration unreachable, and all four are repairable:
-
-* **Nothing selects it.** `launch-sc-2` is a **symlink to `launch-sc-1`** — same
-  md5, same banner `LAUNCHING SINGLE EFFECTS SERVER CONFIGURATION` — and so loads
-  `init_sc_1.scd`. `init_sc_2.scd` is present and is the larger file (7205 bytes
-  against 4136). The launcher named for this configuration points at its sibling.
-* **`~dspGroup` is used at lines 68-69 and defined at line 77**, so the input and
-  output routers are created against `nil`.
-* **`~serverANumOuts = 4`**, but the main outputs are buses 0 and 7. Bus 7 does not
-  exist on `server_a`.
-* **`launch-sn`** would start `supernova`, the multicore server that is the right
-  answer here. Its `supernova` line is commented out, it `cd`s into
-  `/usr/share/efx` which does not exist, and it starts `jackd -dalsa -dhw:4` when
-  the only card present is card 0. **No `supernova` binary is installed.**
-
-**None of those is the reason it cannot work.** Underneath all four:
-
-> **The shipped `scsynth` is an ALSA-only build.** `SC_AlsaDriver` is present;
-> `SC_JackDriver` appears **zero** times.
-
-`jackd` *is* installed at `/usr/bin/jackd` — an earlier version of this report said
-it was absent, which was wrong — but `scsynth` cannot be a JACK client, so it cannot
-help. And two ALSA clients cannot share this card:
+That is wrong. `scsynth`'s audio thread runs **on cpu1, alone, at `SCHED_FIFO`
+priority 99**:
 
 ```
-card 0 [xmosaudio]   the only card
-pcm0p                subdevices_count: 1    subdevices_avail: 0
-hw_params            access: RW_INTERLEAVED (not MMAP)
-                     8ch S24_LE 48000, period 256, buffer 512
-/usr/lib/alsa-lib/   smixer only            (no dmix plugin)
-/etc/asound.conf     empty
+scsynth per-thread:
+  tid 1342  affinity=2  last-cpu=1  jiffies=71290  policy/prio=1/99   <- audio
+  all others affinity=1 last-cpu=0  jiffies<=2888  prio 94
 ```
 
-One subdevice, already held. `dmix` is the way to share an ALSA device and it
-requires mmap on the slave, which this driver does not offer — and the plugin is not
-installed regardless. No `snd-aloop` module either.
+`taskset -p <pid>` reports only a process's MAIN thread, which is what hid it and
+produced the original claim.
 
-**JACK works on this hardware. Tested.** Stopping the audio stack and starting the
-`jackd` that already ships, on the card that actually exists:
+Worse, the evidence the finding offered — `SC_AlsaDriver` present, `SC_JackDriver`
+absent — is the **mechanism, presented as the deficiency**. Upstream SuperCollider
+has no ALSA backend. Moog wrote one, and its own error strings
+(`Unsuccessful in setting thread core affinity`) say what for: to pin the audio
+thread to a core, with `isolcpus=1` in the bootloader reserving it. That is a
+correct realtime audio design, done deliberately.
 
-```
-jackd -d alsa -d hw:0 -r 48000 -p 256 -n 2
-
-JACK server starting in realtime mode with priority 10
-configuring for 48000Hz, period = 256 frames (5.3 ms), buffer = 2 periods
-ALSA: final selected sample format for capture:  24bit little-endian
-ALSA: final selected sample format for playback: 24bit little-endian
-```
-
-`jackdmp 1.9.12`. It took the card, matched its 24-bit format in both directions,
-published all 8 capture and 8 playback ports, and ran with **zero xruns** in
-realtime mode at a 5.3 ms period. `S42sc restart` restored the instrument normally
-afterwards.
-
-Two further faults in `launch-sn` follow from that, now demonstrated rather than
-suspected: it asks for **`-dhw:4`** when the only card is `hw:0`, and it passes
-**`-S`**, JACK's *16-bit shorts* flag, to a card whose format is `S24_LE`.
-
-**What would fix it is one binary, not three.** Ship a `scsynth` built with the JACK
-driver — or the `supernova` that `launch-sn` already expects — and correct
-`launch-sn`'s card and format flags. The sharing layer is already on the device,
-already works, and is not used by anything.
-
-For a customer this is out of reach: there is no compiler on the instrument, and the
-sysroot is armv7l against glibc 2.21 (Buildroot, 2015) on a 4.1.15-rt kernel. For
-whoever builds the image it is a build-flag change.
-
-**Verification**
-
-```sh
-strings /usr/bin/scsynth | grep -c SC_JackDriver     # 0
-strings /usr/bin/scsynth | grep -c SC_AlsaDriver     # non-zero
-cat /proc/asound/card0/pcm0p/info | grep subdevices  # count 1, avail 0
-cat /proc/asound/card0/pcm0p/sub0/hw_params          # access: RW_INTERLEAVED
-ls /usr/lib/alsa-lib/                                # smixer only
-ls -l /usr/share/las-fx/launch-sc-2                  # -> launch-sc-1
-```
+**What survives, as an observation rather than a defect:** `init_sc_2.scd` describes
+a two-server split (`frontendGroup lives on shared CPU core, dspGroup lives on DSP
+core`) that is unreachable because `launch-sc-2` is a symlink to `launch-sc-1`. That
+is a loose end in the shipped image, not idle silicon. Its value would be moving
+non-DSP work off cpu1, not gaining a core — there is no spare core to gain.
 
 ---
 
