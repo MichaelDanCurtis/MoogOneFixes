@@ -646,6 +646,68 @@ ssh root@<ip> 'sync; /sbin/reboot'
 
 ---
 
+## 15. `S02sys` writes the RT budget into a file called `/sched_rt_runtime_us` — CONFIRMED
+
+**Impact.** Moog intended to raise the realtime budget from the 95% default to
+99.995%. The line has no directory in it, so it creates a file in `/` and the
+throttle stays at 95% — which is the throttle that produces audible dropouts
+(finding 4).
+
+`/etc/init.d/S02sys`, line 8:
+
+```sh
+echo 999950 > sched_rt_runtime_us
+```
+
+There is no `cd` to `/proc/sys/kernel/` anywhere above it. The evidence is on the
+instrument, with the current boot's timestamp:
+
+```
+$ cat /proc/sys/kernel/sched_rt_runtime_us
+950000                                   <- still the kernel default
+
+$ ls -la /sched_rt_runtime_us
+-rw-r--r-- 1 root root 7 Sep  8 19:11    <- written at boot, into the root directory
+```
+
+Seven bytes: `999950\n`. The value Moog wanted, in the wrong file, every boot since
+the unit was built.
+
+**Why it matters.** `scsynth`'s audio thread runs `SCHED_FIFO` at priority 99 on an
+isolated core. At `sched_rt_runtime_us = 950000` the kernel deschedules it once it
+exceeds 95% of each period, which is heard as the sound cutting out for about a
+tenth of a second. `dmesg` on this unit carries `sched: RT throttling activated`.
+The intended 999950 would have left it essentially unthrottled.
+
+**Suggested fix.** One word:
+
+```sh
+echo 999950 > /proc/sys/kernel/sched_rt_runtime_us
+```
+
+**A caution worth stating.** 999950/1000000 leaves 50 µs per second for everything
+that is not realtime. That is close to no safety valve at all: a realtime thread
+that spins takes the machine with it, and the 95% default exists precisely to stop
+that. The fix restores Moog's intent, and their intent was aggressive. A middle
+value — 980000, say — buys most of the headroom and keeps a usable margin.
+
+---
+
+## 16. `S14fs` lists a crontab instead of starting `crond` — CONFIRMED
+
+`/etc/init.d/S14fs`, line 61:
+
+```sh
+crontab -c /etc/crontab -l
+```
+
+`-l` **lists** a crontab. It does not start a daemon. There is no `crond` in the
+process table, so the daily log rotation the entry exists for has never run on any
+unit. `S99final` compensates by hand — deleting `/var/log/*.0.*` and rotating the
+watchdog log at every boot — which is why nobody noticed.
+
+---
+
 ## RETRACTED — `inputRouter` writes 56-59, `outputRouter` reads 60-63
 
 Reading `synthdefs.scd`, `inputRouter` ends with `Out.ar(56..59, ...)` while
